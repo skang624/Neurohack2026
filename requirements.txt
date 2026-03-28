@@ -1,0 +1,5 @@
+streamlit>=1.36
+networkx>=3.2
+plotly>=5.22
+numpy>=1.26
+kaleido>=0.2.1
