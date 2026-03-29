@@ -45,8 +45,8 @@ def compute_weighted_degrees(graph: nx.Graph) -> Dict[int, float]:
 
 def compute_node_sizes(
     weighted_degrees: Dict[int, float],
-    min_size: float = 18.0,
-    max_size: float = 56.0,
+    min_size: float = 10.0,
+    max_size: float = 20.0,
 ) -> Dict[int, float]:
     """Map weighted degree values into display node sizes."""
     if not weighted_degrees:

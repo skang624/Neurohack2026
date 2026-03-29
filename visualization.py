@@ -10,11 +10,11 @@ import plotly.graph_objects as go
 
 
 def _weight_to_color(weight: float, alpha: float = 0.65) -> str:
-    """Map an edge weight in [0, 1] to an RGBA blue color."""
+    """Map an edge weight in [0, 1] to an RGBA orange color."""
     v = min(1.0, max(0.0, weight))
-    r = int(30 + (1 - v) * 80)
-    g = int(80 + (1 - v) * 100)
-    b = int(220)
+    r = int(255 - (1 - v) * 25)
+    g = int(140 + (1 - v) * 55)
+    b = int(40 + (1 - v) * 35)
     return f"rgba({r},{g},{b},{alpha})"
 
 
@@ -43,10 +43,10 @@ def plot_graph_plotly(
         is_focus_edge = focus_node is None or (u in focus_group and v in focus_group)
         if is_focus_edge:
             color = _weight_to_color(w) if color_edges_by_weight else "rgba(120,120,160,0.45)"
-            width = 0.4 + 3.2 * w
+            width = 0.6 + 4.2 * w
         else:
             color = "rgba(140,150,170,0.10)"
-            width = 0.25 + 0.5 * w
+            width = 0.35 + 0.7 * w
         edge_traces.append(
             go.Scatter(
                 x=[x0, x1, None],
@@ -99,7 +99,9 @@ def plot_graph_plotly(
     if focus_node is not None and focus_node in graph:
         focus_colors = []
         for node in graph.nodes():
-            if node in focus_group:
+            if node == focus_node:
+                focus_colors.append("rgba(239,68,68,0.96)")
+            elif node in focus_group:
                 focus_colors.append("rgba(37,99,235,0.92)")
             else:
                 focus_colors.append("rgba(175,186,205,0.25)")

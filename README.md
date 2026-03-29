@@ -1,40 +1,18 @@
-# Dynamic Graph Visualizer (Streamlit)
+# Social Brain Atlas (Hackathon Submission)
+Interactive connectivity demo built with Streamlit, NetworkX, and Plotly.
 
-A polished Python demo app that visualizes dynamic weighted graphs from adjacency matrices.
+## What this demo shows
+- Dynamic connectivity map + adjacency heatmap animation
+- Story-driven demo mode (Sehong migration timeline)
+- Side-by-side neuron visualization cards + vibe-music recommendation
 
-## Features
-- Synthetic dynamic adjacency generation: symmetric, weighted, time-varying, noise-aware.
-- File upload support for `.csv` and `.npy` with robust validation.
-- Interactive graph visualization with NetworkX + Plotly.
-- Stable layout across time (spring layout computed once).
-- Node size by weighted degree and edge width by weight.
-- Heatmap view of the current adjacency matrix.
-- Summary stats and human-readable insight text.
-- Animation playback mode and adjustable speed.
-- Export graph as HTML and PNG.
+## Optional local run
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
 
-## Project structure
-- `app.py` - Streamlit UI and app orchestration.
-- `data_utils.py` - synthetic data generation and file loading.
-- `graph_utils.py` - graph construction, metrics, and summary logic.
-- `visualization.py` - Plotly graph and heatmap rendering helpers.
-
-## Run
-1. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. Start the app:
-   ```bash
-   streamlit run app.py
-   ```
-
-## Upload formats
-- `.csv`: one square adjacency matrix `(N, N)`.
-- `.npy`: either `(N, N)` or `(T, N, N)`.
-
-If a single matrix is uploaded, the app treats it as static over time.
-
-## Notes
-- Matrices are clipped to `[0, 1]` and diagonal entries are forced to zero.
-- Optional auto-symmetrization is available for uploaded data.
+## Notes for reviewers
+- This repository is prepared for demo/submission readability first.
+- Sensitive brain ROI data is intentionally excluded from this submission.
+- Some parts are intentionally simplified for presentation speed and clarity.

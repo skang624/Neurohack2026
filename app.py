@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import os
 from datetime import datetime
 from typing import List
@@ -25,8 +27,142 @@ from graph_utils import (
 )
 from visualization import plot_graph_plotly, plot_matrix_heatmap
 
-
 st.set_page_config(page_title="Dynamic Graph Demo", layout="wide")
+
+
+def _load_neuron_stage_image(image_root: str, person: str, stage: str) -> bytes:
+    """Load person/stage neuron image from local directory using filename heuristics."""
+    if not os.path.isdir(image_root):
+        raise FileNotFoundError(f"Image directory not found: {image_root}")
+
+    valid_ext = (".jpg", ".jpg", ".jpeg", ".webp")
+    files = [f for f in os.listdir(image_root) if f.lower().endswith(valid_ext)]
+    if not files:
+        raise FileNotFoundError(f"No image files found in: {image_root}")
+
+    person = person.lower().strip()
+    stage = stage.lower().strip()
+    person_files = [fname for fname in files if person in fname.lower()]
+    if not person_files:
+        raise FileNotFoundError(f"No images found for person '{person}' in: {image_root}")
+
+    preferred = []
+    for fname in person_files:
+        low = fname.lower()
+        if stage == "early" and ("early" in low or "before" in low):
+            preferred.append(fname)
+        if stage == "after" and ("after" in low or "moving" in low or "post" in low):
+            preferred.append(fname)
+
+    # Fallback: still restrict to this person's files only.
+    if not preferred:
+        ordered = sorted(person_files)
+        if len(ordered) >= 2:
+            preferred = [ordered[0]] if stage == "early" else [ordered[-1]]
+        else:
+            preferred = [ordered[0]]
+
+    chosen = os.path.join(image_root, sorted(preferred)[0])
+    with open(chosen, "rb") as f:
+        return f.read()
+
+
+def _load_exact_image_file(image_root: str, filename: str) -> bytes:
+    """Load an exact image file from the local image directory."""
+    path = os.path.join(image_root, filename)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Image file not found: {path}")
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def _render_neuron_image_card(title: str, subtitle: str, image_bytes: bytes) -> None:
+    """Render image in a fixed white card while preserving aspect ratio."""
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    data_url = base64.b64encode(buf.getvalue()).decode("utf-8")
+    st.markdown(
+        f"""
+        <div style="
+          border-radius: 14px;
+          border: 1px solid rgba(120, 145, 200, 0.28);
+          background: rgba(255,255,255,0.95);
+          padding: 12px 12px 14px 12px;
+          min-height: 430px;
+          box-shadow: 0 8px 18px rgba(30,55,110,0.10);
+        ">
+          <div style="font-size:30px; font-weight:800; color:rgba(22,34,64,0.96); margin-bottom:4px;">{title}</div>
+          <div style="font-size:18px; font-weight:600; color:rgba(68,83,118,0.90); margin-bottom:8px;">{subtitle}</div>
+          <div style="
+            background:#ffffff;
+            border:1px solid rgba(160,175,210,0.25);
+            border-radius:12px;
+            height:340px;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            overflow:hidden;
+          ">
+            <img src="data:image/png;base64,{data_url}" style="max-width:96%; max-height:96%; object-fit:contain;" />
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def _build_social_neuron_prompt(
+    node_idx: int,
+    node_names: List[str],
+    matrix: np.ndarray,
+    frame_label: str,
+    components_label: str,
+) -> str:
+    """Create a neuron-only prompt from highlighted-node connectivity rules."""
+    m = np.asarray(matrix, dtype=float)
+    row = m[node_idx].copy()
+    row[node_idx] = 0.0
+
+    # Active edges around the highlighted node.
+    active = row > 0.05
+    edge_count = int(np.sum(active))
+    edge_ratio = edge_count / max(1, len(row) - 1)
+
+    # Rule 1) Dendrite count from average edge count (mapped to 3..18 branches).
+    dendrite_count = int(np.clip(round(3 + 15 * edge_ratio), 3, 18))
+
+    # Rule 2) Dendrite thickness from average edge strength.
+    avg_edge_strength = float(np.mean(row[active])) if np.any(active) else 0.0
+    dendrite_thickness = float(np.clip(0.6 + 4.6 * avg_edge_strength, 0.6, 5.2))
+
+    # Rule 3) Axon length from average node distance (inverse of edge weights as proxy distance).
+    if np.any(active):
+        dist_proxy = 1.0 / np.clip(row[active], 1e-4, 1.0)
+        avg_distance = float(np.mean(dist_proxy))
+    else:
+        avg_distance = 12.0
+    axon_length_level = (
+        "short"
+        if avg_distance < 3.0
+        else ("medium" if avg_distance < 8.0 else "long")
+    )
+
+    order = np.argsort(-row)
+    top = [int(i) for i in order if int(i) != node_idx and row[int(i)] > 0][:4]
+    top_links = ", ".join(f"{node_names[i]} ({row[i]:.2f})" for i in top) if top else "none"
+
+    return (
+        "Generate a clean scientific neuron illustration ONLY. "
+        f"Context: {node_names[node_idx]}, frame {frame_label}, mode {components_label}. "
+        f"Neuron morphology rules: soma is central; dendrite count = {dendrite_count}; "
+        f"dendrite thickness = {dendrite_thickness:.2f}px equivalent; "
+        f"axon length should be {axon_length_level} based on average node distance ({avg_distance:.2f}). "
+        f"Strongest synaptic hints: {top_links}. "
+        "Render a single isolated neuron with visible soma, dendrites, one axon, and axon terminals. "
+        "No human face, no body, no portrait, no characters, no text, no logo, no watermark. "
+        "Background must be plain white or transparent-looking very light neutral background. "
+        "Minimal composition, high anatomical clarity, soft realistic shading, centered subject."
+    )
 
 
 @st.cache_resource(show_spinner=False)
@@ -136,8 +272,10 @@ def _load_world_map_image(image_path: str) -> tuple[Image.Image, int, int]:
 
 
 @st.cache_data(show_spinner=False)
-def _load_world_demo_data(num_steps: int, random_seed: int = 11) -> tuple[np.ndarray, np.ndarray, List[str]]:
-    """Build a custom world demo: Sehong moves KR->US and connectivity shifts over time."""
+def _load_world_demo_data(
+    num_steps: int, random_seed: int = 11
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
+    """Build demo tensors: total, structural, functional, coords, names."""
     t_max = max(6, int(num_steps))
     num_nodes = 12
     rng = np.random.default_rng(random_seed)
@@ -152,7 +290,11 @@ def _load_world_demo_data(num_steps: int, random_seed: int = 11) -> tuple[np.nda
         "Kevin", "Liam", "Mia", "Noah", "Olivia", "Peter", "Quinn", "Ryan", "Sophie", "Tyler",
         "Uma", "Victor", "Wendy", "Xavier", "Yuna", "Zane",
     ]
-    selected = rng.choice(name_pool, size=num_nodes - 1, replace=False).tolist()
+    guaranteed = ["Amy", "Peter"]
+    candidates = [n for n in name_pool if n not in guaranteed]
+    selected_rest = rng.choice(candidates, size=num_nodes - 1 - len(guaranteed), replace=False).tolist()
+    selected = guaranteed + selected_rest
+    rng.shuffle(selected)
     names: List[str] = []
     src_i = 0
     for i in range(num_nodes):
@@ -162,9 +304,15 @@ def _load_world_demo_data(num_steps: int, random_seed: int = 11) -> tuple[np.nda
             names.append(selected[src_i])
             src_i += 1
 
+    # Keep key narrative nodes in the US cluster for clearer demo dynamics.
+    for target_name, target_pos in [("Amy", us_idx[0]), ("Peter", us_idx[1])]:
+        cur = names.index(target_name)
+        if cur != target_pos and target_pos != sehong_idx:
+            names[cur], names[target_pos] = names[target_pos], names[cur]
+
     # Pixel anchors on the provided map.
     us_anchor = np.array([380.0, 245.0])
-    kr_anchor = np.array([1230.0, 250.0])
+    kr_anchor = np.array([1290.0, 250.0])
     base_coords = np.zeros((num_nodes, 2), dtype=float)
     for i in us_idx:
         base_coords[i] = us_anchor + rng.normal(loc=[0.0, 0.0], scale=[85.0, 60.0], size=2)
@@ -190,32 +338,52 @@ def _load_world_demo_data(num_steps: int, random_seed: int = 11) -> tuple[np.nda
     coords_t[:, :, 0] = np.clip(coords_t[:, :, 0], 35.0, 1565.0)
     coords_t[:, :, 1] = np.clip(coords_t[:, :, 1], 35.0, 678.0)
 
-    # Base matrix with region structure.
-    base = np.zeros((num_nodes, num_nodes), dtype=float)
+    # Functional base matrix with region preference (shared interests / habits).
+    base_func = np.zeros((num_nodes, num_nodes), dtype=float)
     for i in range(num_nodes):
         for j in range(i + 1, num_nodes):
             same_region = (i in us_idx and j in us_idx) or (i in kr_idx and j in kr_idx)
             if same_region:
-                w0 = rng.uniform(0.45, 0.88)
+                w0 = rng.uniform(0.45, 0.86)
             else:
-                w0 = rng.uniform(0.04, 0.25)
-            base[i, j] = base[j, i] = w0
+                w0 = rng.uniform(0.08, 0.28)
+            base_func[i, j] = base_func[j, i] = w0
 
-    # Sehong starts KR-heavy and US-light.
+    # Sehong starts functionally KR-heavy and US-light.
     for j in us_idx:
-        base[sehong_idx, j] = base[j, sehong_idx] = rng.uniform(0.03, 0.12)
+        base_func[sehong_idx, j] = base_func[j, sehong_idx] = rng.uniform(0.03, 0.12)
     for j in kr_idx:
         if j != sehong_idx:
-            base[sehong_idx, j] = base[j, sehong_idx] = rng.uniform(0.5, 0.85)
+            base_func[sehong_idx, j] = base_func[j, sehong_idx] = rng.uniform(0.5, 0.85)
 
-    # Time-varying adjacency with migration-driven connectivity shifts.
-    adjacency = np.zeros((t_max, num_nodes, num_nodes), dtype=float)
+    # Functional connectivity with migration-driven preference shifts.
+    functional = np.zeros((t_max, num_nodes, num_nodes), dtype=float)
     phase = rng.uniform(0, 2 * np.pi, size=(num_nodes, num_nodes))
-    freq = rng.uniform(0.5, 1.6, size=(num_nodes, num_nodes))
+    freq = rng.uniform(0.4, 1.4, size=(num_nodes, num_nodes))
+    amy_idx = names.index("Amy")
+    peter_idx = names.index("Peter")
+    # Keep only a subset of US ties strongly strengthened after migration.
+    strong_us_names = {"Amy", "Peter"}
+    strong_us_idx = {names.index(n) for n in strong_us_names if n in names}
+    weak_us_idx = [j for j in us_idx if j not in strong_us_idx]
+    sehong_us_target_strong = {j: float(rng.uniform(0.42, 0.60)) for j in strong_us_idx}
+    sehong_us_target_weak = {j: float(rng.uniform(0.05, 0.18)) for j in weak_us_idx}
+    sehong_kr_target = {j: float(rng.uniform(0.34, 0.55)) for j in kr_idx if j != sehong_idx}
+    sehong_special_start = {
+        amy_idx: 0.0,
+        peter_idx: 0.0,
+    }
+    sehong_special_target = {
+        amy_idx: float(rng.uniform(0.78, 0.82)),
+        peter_idx: float(rng.uniform(0.78, 0.82)),
+    }
+    weak_contact_names = ["Kevin", "Mia", "Ryan", "Quinn"]
+    weak_contact_idx = [names.index(n) for n in weak_contact_names if n in names and names.index(n) != sehong_idx]
+    special_full_idx = min(t_max - 1, end_move + 18)
     for t in range(t_max):
         tau = 2 * np.pi * (t / max(1, t_max - 1))
-        m = base.copy()
-        dyn = 0.035 * np.sin(freq * tau + phase)
+        m = base_func.copy()
+        dyn = 0.05 * np.sin(freq * tau + phase)
         m += np.triu(dyn, 1)
         m = np.triu(m, 1)
         m = m + m.T
@@ -227,23 +395,67 @@ def _load_world_demo_data(num_steps: int, random_seed: int = 11) -> tuple[np.nda
         else:
             travel_alpha = (t - start_move) / max(1, (end_move - start_move))
 
-        # As Sehong arrives in US, US links strengthen; KR links slightly weaken but remain.
+        # As Sehong arrives in US, US links become much stronger and KR links soften.
         for j in us_idx:
-            old = m[sehong_idx, j]
-            new = old * (0.35 + 1.35 * travel_alpha)
+            old = float(m[sehong_idx, j])
+            if j in sehong_us_target_strong:
+                target = sehong_us_target_strong[j]
+            else:
+                target = sehong_us_target_weak[j]
+            # Non-key US ties should stay limited after migration.
+            if j in sehong_us_target_strong:
+                blend = travel_alpha
+            else:
+                blend = min(1.0, 1.15 * travel_alpha)
+            new = (1.0 - blend) * old + blend * target
             m[sehong_idx, j] = m[j, sehong_idx] = new
         for j in kr_idx:
             if j == sehong_idx:
                 continue
-            old = m[sehong_idx, j]
-            new = old * (1.0 - 0.32 * travel_alpha)
+            old = float(m[sehong_idx, j])
+            target = sehong_kr_target[j]
+            new = (1.0 - travel_alpha) * old + travel_alpha * target
             m[sehong_idx, j] = m[j, sehong_idx] = new
+
+        # Explicitly highlight new close ties after moving abroad.
+        for j, target in sehong_special_target.items():
+            if t <= start_move:
+                special_alpha = 0.0
+            elif t >= special_full_idx:
+                special_alpha = 1.0
+            else:
+                special_alpha = (t - start_move) / max(1, (special_full_idx - start_move))
+            smooth_alpha = special_alpha * special_alpha * (3.0 - 2.0 * special_alpha)
+            start_val = sehong_special_start[j]
+            new = (1.0 - smooth_alpha) * start_val + smooth_alpha * target
+            m[sehong_idx, j] = m[j, sehong_idx] = new
+
+        # Keep selected ties nearly disconnected across the timeline.
+        for j in weak_contact_idx:
+            m[sehong_idx, j] = m[j, sehong_idx] = min(float(m[sehong_idx, j]), 0.03)
 
         m = np.clip(m, 0.0, 1.0)
         np.fill_diagonal(m, 0.0)
-        adjacency[t] = m
+        functional[t] = m
 
-    return adjacency, coords_t, names
+    # Structural connectivity is distance-driven (closer => stronger).
+    structural = np.zeros((t_max, num_nodes, num_nodes), dtype=float)
+    sigma = 340.0
+    for t in range(t_max):
+        c = coords_t[t]
+        diff = c[:, None, :] - c[None, :, :]
+        dist = np.sqrt(np.sum(diff * diff, axis=2))
+        s = np.exp(-((dist / sigma) ** 2))
+        s = np.clip(s, 0.0, 1.0)
+        np.fill_diagonal(s, 0.0)
+        s = (s + s.T) * 0.5
+        for j in weak_contact_idx:
+            s[sehong_idx, j] = s[j, sehong_idx] = min(float(s[sehong_idx, j]), 0.03)
+        structural[t] = s
+
+    # Total connectivity: sum-like blend of both factors, kept in [0,1].
+    total = np.clip(0.5 * structural + 0.5 * functional, 0.0, 1.0)
+    return total, structural, functional, coords_t, names
 
 
 def _positions_from_pixels(coords: np.ndarray) -> dict:
@@ -278,11 +490,11 @@ def _apply_world_map_overlay(fig: go.Figure, image_obj: Image.Image, width: int,
 
 
 def _edge_color(weight: float, alpha: float = 0.62) -> str:
-    """Map edge weight to RGBA color."""
+    """Map edge weight to RGBA orange color."""
     v = min(1.0, max(0.0, float(weight)))
-    r = int(30 + (1 - v) * 80)
-    g = int(80 + (1 - v) * 100)
-    b = 220
+    r = int(255 - (1 - v) * 25)
+    g = int(140 + (1 - v) * 55)
+    b = int(40 + (1 - v) * 35)
     return f"rgba({r},{g},{b},{alpha})"
 
 
@@ -299,6 +511,7 @@ def _build_demo_fixed_animation(
     map_img: Image.Image,
     map_w: int,
     map_h: int,
+    heatmap_title: str,
 ) -> go.Figure:
     """Stable demo animation with synchronized map + heatmap in one figure."""
     t_max, n_nodes, _ = adjacency_tensor.shape
@@ -327,10 +540,10 @@ def _build_demo_fixed_animation(
             else:
                 if focus_node is None or (u in focus_group and v in focus_group):
                     color = _edge_color(w)
-                    width = 0.4 + 3.2 * w
+                    width = 0.6 + 4.2 * w
                 else:
                     color = "rgba(140,150,170,0.10)"
-                    width = 0.25 + 0.5 * w
+                    width = 0.35 + 0.7 * w
 
             traces.append(
                 go.Scatter(
@@ -357,7 +570,12 @@ def _build_demo_fixed_animation(
             if focus_node is None:
                 node_colors.append("rgba(37,99,235,0.88)")
             else:
-                node_colors.append("rgba(37,99,235,0.92)" if i in focus_group else "rgba(175,186,205,0.25)")
+                if i == focus_node:
+                    node_colors.append("rgba(239,68,68,0.96)")
+                elif i in focus_group:
+                    node_colors.append("rgba(37,99,235,0.92)")
+                else:
+                    node_colors.append("rgba(175,186,205,0.25)")
 
         traces.append(
             go.Scatter(
@@ -394,14 +612,26 @@ def _build_demo_fixed_animation(
         )
         return traces
 
-    fig = go.Figure(data=frame_data(start_idx), frames=[go.Frame(name=str(t), data=frame_data(t)) for t in range(t_max)])
+    initial_data = frame_data(start_idx)
+    total_traces = len(initial_data)
+    fig = go.Figure(
+        data=initial_data,
+        frames=[
+            go.Frame(
+                name=str(t),
+                data=frame_data(t),
+                traces=list(range(total_traces)),
+            )
+            for t in range(t_max)
+        ],
+    )
     fig.add_layout_image(
         dict(
             source=map_img,
             xref="x",
             yref="y",
             x=0,
-            y=map_h,
+            y=0,
             sizex=map_w,
             sizey=map_h,
             sizing="contain",
@@ -439,6 +669,7 @@ def _build_demo_fixed_animation(
         yaxis2=dict(
             domain=[0.10, 1.0],
             autorange="reversed",
+            side="right",
             tickfont=dict(size=10, color="rgba(70,85,120,0.9)"),
         ),
         height=620,
@@ -456,7 +687,7 @@ def _build_demo_fixed_animation(
                 font=dict(size=18, color="rgba(24,36,64,0.95)"),
             ),
             dict(
-                text="<b>Adjacency Heatmap</b>",
+                text=f"<b>{heatmap_title}</b>",
                 x=0.70,
                 y=1.08,
                 xref="paper",
@@ -483,7 +714,7 @@ def _build_demo_fixed_animation(
                         "args": [
                             None,
                             {
-                                "frame": {"duration": frame_duration_ms, "redraw": False},
+                                "frame": {"duration": frame_duration_ms, "redraw": True},
                                 "transition": {"duration": int(frame_duration_ms * 0.9), "easing": "cubic-in-out"},
                                 "fromcurrent": True,
                             },
@@ -492,7 +723,7 @@ def _build_demo_fixed_animation(
                     {
                         "label": "Pause",
                         "method": "animate",
-                        "args": [[None], {"mode": "immediate", "frame": {"duration": 0, "redraw": False}}],
+                        "args": [[None], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}}],
                     },
                 ],
             }
@@ -510,7 +741,7 @@ def _build_demo_fixed_animation(
                     {
                         "label": frame_labels[t] if t < len(frame_labels) else str(t),
                         "method": "animate",
-                        "args": [[str(t)], {"mode": "immediate", "frame": {"duration": 0, "redraw": False}}],
+                        "args": [[str(t)], {"mode": "immediate", "frame": {"duration": 0, "redraw": True}}],
                     }
                     for t in range(t_max)
                 ],
@@ -747,9 +978,9 @@ def main() -> None:
     st.markdown(
         """
         <div class="top-banner">
-          <h2 style="margin:0 0 6px 0;">Social Brain Atlas</h2>
+          <h2 style="margin:0 0 6px 0;">Social Connectome</h2>
           <div style="font-size:15px; opacity:0.95;">
-            Edge thickness = Connection strength, Node size = Influence.
+            We turn human relationships into a social brain, inspired by neural connection.
           </div>
         </div>
         """,
@@ -759,7 +990,7 @@ def main() -> None:
     with st.sidebar:
         st.header("Controls")
 
-        mode = st.radio("Data source", ["Upload", "Brain ROI (Functional Connectivity Only)", "Demo"], index=1)
+        mode = st.radio("Data source", ["Upload", "Brain ROI (Functional Connectivity Only)", "Demo"], index=2)
 
         symmetrize = st.checkbox("Auto-symmetrize uploaded matrices", value=True)
         spring_seed = 42
@@ -771,6 +1002,9 @@ def main() -> None:
         animation_speed = st.slider("Animation speed (sec/frame)", 0.05, 1.0, 0.20, 0.05)
 
         adjacency_tensor = None
+        structural_tensor = None
+        functional_tensor = None
+        selected_components: List[str] = []
         upload_warning = None
         uploaded_coords = None
         demo_coords_t = None
@@ -807,7 +1041,24 @@ def main() -> None:
         else:
             demo_steps = (2026 - 2019 + 1) * 12  # Jan 2019 ~ Dec 2026
             frame_labels = _build_month_labels(demo_steps, start_year=2019, start_month=1)
-            adjacency_tensor, demo_coords_t, default_demo_names = _load_world_demo_data(demo_steps)
+            total_tensor, structural_tensor, functional_tensor, demo_coords_t, default_demo_names = _load_world_demo_data(demo_steps)
+            show_structural = st.checkbox("Show structural connectivity", value=True)
+            show_functional = st.checkbox("Show functional connectivity", value=True)
+            selected_components = []
+            if show_structural:
+                selected_components.append("Structural")
+            if show_functional:
+                selected_components.append("Functional")
+            if not selected_components:
+                selected_components = ["Structural"]
+                st.caption("At least one component is required. Falling back to Structural.")
+
+            if selected_components == ["Structural"]:
+                adjacency_tensor = structural_tensor
+            elif selected_components == ["Functional"]:
+                adjacency_tensor = functional_tensor
+            else:
+                adjacency_tensor = np.clip(0.5 * structural_tensor + 0.5 * functional_tensor, 0.0, 1.0)
             world_map_path = "/home/acrl/Downloads/world-map-png-35423.png"
             if os.path.exists(world_map_path):
                 world_map_img, w, h = _load_world_map_image(world_map_path)
@@ -844,7 +1095,7 @@ def main() -> None:
         st.caption("Single-step dataset detected (T=1).")
 
     if mode == "Brain ROI (Functional Connectivity Only)":
-        default_names = [f"data{i + 1}" for i in range(n_nodes)]
+        default_names = [f"neuron{i + 1}" for i in range(n_nodes)]
     elif mode == "Demo":
         default_names = default_demo_names
     else:
@@ -912,8 +1163,16 @@ def main() -> None:
     )
 
     st.info(_human_interpretation(summary, time_idx))
+    if mode == "Demo":
+        comp_label = " + ".join(selected_components) if selected_components else "Structural"
+        st.caption(f"Current score view: {comp_label} connectivity")
+    else:
+        comp_label = "Connectivity"
 
     if mode == "Demo" and demo_coords_t is not None and world_map_img is not None and world_map_size is not None:
+        heatmap_title = "Adjacency Heatmap"
+        if selected_components:
+            heatmap_title = f"Adjacency Heatmap ({' + '.join(selected_components)})"
         demo_anim = _build_demo_fixed_animation(
             adjacency_tensor=adjacency_tensor,
             coords_t=demo_coords_t,
@@ -927,6 +1186,7 @@ def main() -> None:
             map_img=world_map_img,
             map_w=world_map_size[0],
             map_h=world_map_size[1],
+            heatmap_title=heatmap_title,
         )
         st.plotly_chart(demo_anim, use_container_width=True)
     else:
@@ -972,6 +1232,62 @@ def main() -> None:
             else:
                 st.plotly_chart(fig_matrix, use_container_width=True)
 
+    st.subheader("Visuazlize Social Neuron")
+    image_root = "/home/acrl/research/Neurohack/image"
+
+    if focus_node_idx is None:
+        st.caption("Choose a `Highlight node` first to enable neuron visualization.")
+        st.session_state["show_neuron_panel"] = False
+    else:
+        if st.button("Visuazlize Social Neuron", type="primary"):
+            st.session_state["show_neuron_panel"] = True
+
+    if st.session_state.get("show_neuron_panel", False):
+        friend_choice = st.selectbox("This Person May Match Your Vibe", options=["Mia", "Quinn"], index=0, key="friend_choice")
+        friend_image_file = "energetic.jpg" if friend_choice == "Mia" else "calm.jpg"
+
+        col_neuron_left, col_neuron_right = st.columns(2)
+        with col_neuron_left:
+            try:
+                sehong_img = _load_exact_image_file(image_root=image_root, filename="chill.jpg")
+                _render_neuron_image_card(
+                    title="Your Neuron",
+                    subtitle="Chill",
+                    image_bytes=sehong_img,
+                )
+            except Exception as exc:
+                st.error(f"Could not load Sehong image: {exc}")
+
+        with col_neuron_right:
+            try:
+                friend_img = _load_exact_image_file(image_root=image_root, filename=friend_image_file)
+                _render_neuron_image_card(
+                    title=f"This Person May Match Your Vibe: <span style='color:#1d4ed8;'>{friend_choice}</span>",
+                    subtitle=f"You may vibe well with {friend_choice}. {'Energetic' if friend_choice == 'Mia' else 'Calm'} style.",
+                    image_bytes=friend_img,
+                )
+            except Exception as exc:
+                st.error(f"Could not load {friend_choice} image: {exc}")
+
+        st.markdown(f"### Hear Sehong and {friend_choice} Harmony")
+        if st.button("Generate Matching Vibe Music with ElevenLabs", key="generate_vibe_music_btn"):
+            friend_choice = st.session_state.get("friend_choice", "Mia")
+            music_path = (
+                "/home/acrl/research/Neurohack/music/chill_energetic.mp3"
+                if friend_choice == "Mia"
+                else "/home/acrl/research/Neurohack/music/chill_calm.mp3"
+            )
+            st.session_state["vibe_music_path"] = music_path
+
+        vibe_music_path = st.session_state.get("vibe_music_path")
+        if vibe_music_path:
+            if os.path.exists(vibe_music_path):
+                with open(vibe_music_path, "rb") as f:
+                    st.audio(f.read(), format="audio/mp3")
+                st.markdown("**(Generated with EelvenLabs)**")
+            else:
+                st.error(f"Music file not found: {vibe_music_path}")
+
     st.subheader("Export")
     html_blob = fig_graph_static.to_html(full_html=True, include_plotlyjs="cdn")
     st.download_button(
@@ -986,7 +1302,7 @@ def main() -> None:
         st.download_button(
             "Download current graph as PNG",
             data=png_bytes,
-            file_name=f"dynamic_graph_t{time_idx}.png",
+            file_name=f"dynamic_graph_t{time_idx}.jpg",
             mime="image/png",
         )
     except Exception:
